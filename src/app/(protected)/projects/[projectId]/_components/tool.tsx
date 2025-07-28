@@ -3,6 +3,7 @@
 
 import React, { useState } from "react";
 import { useParams } from "next/navigation";
+import { toast } from "sonner";
 import {
   HardDriveUpload,
   Pencil as PencilIcon,
@@ -51,10 +52,11 @@ export default function ToolComponent() {
   const [isGenerateToolDialogOpen, setIsGenerateToolDialogOpen] =
     useState(false); // New state for AI dialog
 
+  const utils = api.useUtils();
+
   // Fetch tools for the agent
   const {
     data: tools,
-    refetch,
     isLoading: isLoadingTools,
   } = api.tool.getByProjectId.useQuery(
     { project_id: projectId! },
@@ -65,14 +67,55 @@ export default function ToolComponent() {
 
   const deleteTool = api.tool.delete.useMutation({
     onSuccess: () => {
-      refetch();
+      utils.tool.getByProjectId.invalidate({ project_id: projectId! });
       setSelectedToolId(null);
     },
   });
-
+  
   const toggleToolActive = api.tool.toggleActive.useMutation({
-    onSuccess: () => {
-      refetch();
+    onMutate: async ({ id, is_active }) => {
+      // Cancel any outgoing refetches
+      await utils.tool.getByProjectId.cancel({ project_id: projectId! });
+
+      // Snapshot the previous value
+      const previousTools = utils.tool.getByProjectId.getData({ project_id: projectId! });
+
+      // Optimistically update the cache
+      utils.tool.getByProjectId.setData(
+        { project_id: projectId! },
+        (old) => {
+          if (!old) return old;
+          return old.map((tool) =>
+            tool.id === id ? { ...tool, is_active } : tool
+          );
+        }
+      );
+
+      // Return context with previous data for rollback
+      return { previousTools };
+    },
+    onError: (_err, _variables, context) => {
+      // Rollback to previous state on error
+      if (context?.previousTools) {
+        utils.tool.getByProjectId.setData(
+          { project_id: projectId! },
+          context.previousTools
+        );
+      }
+      
+      // Show error toast
+      toast.error("Failed to update tool status", {
+        description: "Please try again. If the problem persists, refresh the page.",
+      });
+    },
+    onSuccess: (_data, variables) => {
+      // Show success toast
+      const action = variables.is_active ? "activated" : "deactivated";
+      toast.success(`Tool ${action} successfully`);
+    },
+    onSettled: () => {
+      // Sync with server state regardless of success/error
+      utils.tool.getByProjectId.invalidate({ project_id: projectId! });
     },
   });
 
